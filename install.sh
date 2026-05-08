@@ -82,6 +82,52 @@ get_latest_version() {
   echo "$version"
 }
 
+# ── Download with inline progress ────────────────────────────────────────────
+
+download_with_progress() {
+  local url="$1"
+  local dest="$2"
+  local name="$3"
+
+  # Start curl silently in the background
+  curl -fsSL --http1.1 --retry 3 --retry-delay 2 -o "$dest" "$url" &
+  local pid=$!
+
+  # Show progress by monitoring file size
+  local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    local size=0
+    if [ -f "$dest" ]; then
+      size=$(wc -c < "$dest" 2>/dev/null | tr -d ' ')
+    fi
+    local mb=$(echo "scale=1; ${size:-0} / 1048576" | bc 2>/dev/null || echo "0")
+    local c="${spin:$((i % ${#spin})):1}"
+    printf "\r  %s Downloading %s... %s MB" "$c" "$name" "$mb" >&2
+    i=$((i + 1))
+    sleep 0.3
+  done
+
+  # Check if curl succeeded
+  wait "$pid"
+  local exit_code=$?
+
+  # Final size
+  local final_size=0
+  if [ -f "$dest" ]; then
+    final_size=$(wc -c < "$dest" 2>/dev/null | tr -d ' ')
+  fi
+  local final_mb=$(echo "scale=1; ${final_size:-0} / 1048576" | bc 2>/dev/null || echo "0")
+
+  if [ "$exit_code" -eq 0 ]; then
+    printf "\r  ✓ Downloaded %s (%s MB)          \n" "$name" "$final_mb" >&2
+  else
+    printf "\r  ✗ Download failed                          \n" >&2
+  fi
+
+  return "$exit_code"
+}
+
 # ── Download binary ──────────────────────────────────────────────────────────
 
 download_binary() {
@@ -130,21 +176,20 @@ download_binary() {
       if [ -z "$download_url" ]; then
         die "Could not resolve download URL for $filename"
       fi
-      curl -fL --http1.1 --progress-bar --retry 3 --retry-delay 2 -o "$tmp" "$download_url" \
-        2>/dev/tty \
+      download_with_progress "$download_url" "$tmp" "$filename" \
         || die "Download failed. Asset: $filename"
     else
-      wget -O "$tmp" --progress=dot:mega --header="$header" --header="Accept: application/octet-stream" "$asset_url" \
-        2>/dev/tty \
+      wget -qO "$tmp" --header="$header" --header="Accept: application/octet-stream" "$asset_url" \
         || die "Download failed. Asset: $filename"
     fi
   else
     # Public repo: direct download
     local url="https://github.com/${REPO}/releases/download/${version}/${filename}"
     if command -v curl >/dev/null 2>&1; then
-      curl -fL --progress-bar -o "$tmp" "$url" 2>/dev/tty || die "Download failed. URL: $url"
+      download_with_progress "$url" "$tmp" "$filename" \
+        || die "Download failed. URL: $url"
     else
-      wget -O "$tmp" --progress=dot:mega "$url" 2>/dev/tty || die "Download failed. URL: $url"
+      wget -qO "$tmp" "$url" || die "Download failed. URL: $url"
     fi
   fi
 
