@@ -122,9 +122,15 @@ download_binary() {
 
     local asset_url="https://api.github.com/repos/${REPO}/releases/assets/${asset_id}"
 
-    # Download via API asset endpoint (follows redirect to S3)
+    # Resolve the S3 redirect URL first, then download separately
+    # This avoids HTTP/2 PROTOCOL_ERROR on large file redirects
+    local download_url
     if command -v curl >/dev/null 2>&1; then
-      curl -fL --http1.1 --progress-bar -H "$header" -H "Accept: application/octet-stream" -o "$tmp" "$asset_url" \
+      download_url=$(curl -fsS -H "$header" -H "Accept: application/octet-stream" -w '%{redirect_url}' -o /dev/null "$asset_url")
+      if [ -z "$download_url" ]; then
+        die "Could not resolve download URL for $filename"
+      fi
+      curl -fL --http1.1 --progress-bar --retry 3 --retry-delay 2 -o "$tmp" "$download_url" \
         2>/dev/tty \
         || die "Download failed. Asset: $filename"
     else
