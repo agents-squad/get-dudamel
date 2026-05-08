@@ -124,19 +124,19 @@ download_binary() {
 
     # Download via API asset endpoint (follows redirect to S3)
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL -H "$header" -H "Accept: application/octet-stream" -o "$tmp" "$asset_url" \
+      curl -fL# -H "$header" -H "Accept: application/octet-stream" -o "$tmp" "$asset_url" \
         || die "Download failed. Asset: $filename"
     else
-      wget -qO "$tmp" --header="$header" --header="Accept: application/octet-stream" "$asset_url" \
+      wget --progress=bar:noscroll -O "$tmp" --header="$header" --header="Accept: application/octet-stream" "$asset_url" \
         || die "Download failed. Asset: $filename"
     fi
   else
     # Public repo: direct download
     local url="https://github.com/${REPO}/releases/download/${version}/${filename}"
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL -o "$tmp" "$url" || die "Download failed. URL: $url"
+      curl -fL# -o "$tmp" "$url" || die "Download failed. URL: $url"
     else
-      wget -qO "$tmp" "$url" || die "Download failed. URL: $url"
+      wget --progress=bar:noscroll -O "$tmp" "$url" || die "Download failed. URL: $url"
     fi
   fi
 
