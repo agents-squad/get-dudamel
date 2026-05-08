@@ -88,26 +88,51 @@ download_binary() {
   local platform="$1"
   local version="$2"
   local dest="$3"
-  local url="https://github.com/${REPO}/releases/download/${version}/${BINARY_NAME}-${platform}"
+  local filename="${BINARY_NAME}-${platform}"
   local header
 
   header=$(auth_header)
 
-  info "Downloading ${BINARY_NAME}-${platform} (${version})..."
+  info "Downloading ${filename} (${version})..."
 
   local tmp
   tmp=$(mktemp)
   trap 'rm -f "$tmp"' EXIT
 
-  if command -v curl >/dev/null 2>&1; then
-    if [ -n "$header" ]; then
-      curl -fsSL -H "$header" -H "Accept: application/octet-stream" -o "$tmp" "$url" || die "Download failed. URL: $url"
+  if [ -n "$GITHUB_TOKEN" ]; then
+    # Private repo: resolve asset download URL via API
+    local api_url="https://api.github.com/repos/${REPO}/releases/tags/${version}"
+    local asset_url
+
+    if command -v curl >/dev/null 2>&1; then
+      asset_url=$(curl -fsSL -H "$header" "$api_url" \
+        | grep -A 4 "\"name\": \"${filename}\"" \
+        | grep '"url"' | head -1 \
+        | sed 's/.*"url": *"\([^"]*\)".*/\1/')
     else
-      curl -fsSL -o "$tmp" "$url" || die "Download failed. URL: $url"
+      asset_url=$(wget -qO- --header="$header" "$api_url" \
+        | grep -A 4 "\"name\": \"${filename}\"" \
+        | grep '"url"' | head -1 \
+        | sed 's/.*"url": *"\([^"]*\)".*/\1/')
+    fi
+
+    if [ -z "$asset_url" ]; then
+      die "Could not find asset ${filename} in release ${version}"
+    fi
+
+    # Download via API asset endpoint (follows redirect to S3)
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -H "$header" -H "Accept: application/octet-stream" -o "$tmp" "$asset_url" \
+        || die "Download failed. Asset: $filename"
+    else
+      wget -qO "$tmp" --header="$header" --header="Accept: application/octet-stream" "$asset_url" \
+        || die "Download failed. Asset: $filename"
     fi
   else
-    if [ -n "$header" ]; then
-      wget -qO "$tmp" --header="$header" --header="Accept: application/octet-stream" "$url" || die "Download failed. URL: $url"
+    # Public repo: direct download
+    local url="https://github.com/${REPO}/releases/download/${version}/${filename}"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -o "$tmp" "$url" || die "Download failed. URL: $url"
     else
       wget -qO "$tmp" "$url" || die "Download failed. URL: $url"
     fi
