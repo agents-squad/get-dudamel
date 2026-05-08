@@ -100,25 +100,27 @@ download_binary() {
   trap 'rm -f "$tmp"' EXIT
 
   if [ -n "$GITHUB_TOKEN" ]; then
-    # Private repo: resolve asset download URL via API
+    # Private repo: resolve asset ID via API, then download via asset endpoint
     local api_url="https://api.github.com/repos/${REPO}/releases/tags/${version}"
-    local asset_url
+    local asset_id
 
     if command -v curl >/dev/null 2>&1; then
-      asset_url=$(curl -fsSL -H "$header" "$api_url" \
-        | grep -A 4 "\"name\": \"${filename}\"" \
-        | grep '"url"' | head -1 \
-        | sed 's/.*"url": *"\([^"]*\)".*/\1/')
+      asset_id=$(curl -fsSL -H "$header" "$api_url" \
+        | grep -B 3 "\"name\": \"${filename}\"" \
+        | grep '"id"' | tail -1 \
+        | sed 's/[^0-9]//g')
     else
-      asset_url=$(wget -qO- --header="$header" "$api_url" \
-        | grep -A 4 "\"name\": \"${filename}\"" \
-        | grep '"url"' | head -1 \
-        | sed 's/.*"url": *"\([^"]*\)".*/\1/')
+      asset_id=$(wget -qO- --header="$header" "$api_url" \
+        | grep -B 3 "\"name\": \"${filename}\"" \
+        | grep '"id"' | tail -1 \
+        | sed 's/[^0-9]//g')
     fi
 
-    if [ -z "$asset_url" ]; then
+    if [ -z "$asset_id" ]; then
       die "Could not find asset ${filename} in release ${version}"
     fi
+
+    local asset_url="https://api.github.com/repos/${REPO}/releases/assets/${asset_id}"
 
     # Download via API asset endpoint (follows redirect to S3)
     if command -v curl >/dev/null 2>&1; then
