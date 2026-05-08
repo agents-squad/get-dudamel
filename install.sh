@@ -124,7 +124,7 @@ download_binary() {
 
     # Download via API asset endpoint (follows redirect to S3)
     if command -v curl >/dev/null 2>&1; then
-      curl -fL# -H "$header" -H "Accept: application/octet-stream" -o "$tmp" "$asset_url" \
+      curl -fL# --http1.1 -H "$header" -H "Accept: application/octet-stream" -o "$tmp" "$asset_url" \
         || die "Download failed. Asset: $filename"
     else
       wget --progress=bar:noscroll -O "$tmp" --header="$header" --header="Accept: application/octet-stream" "$asset_url" \
