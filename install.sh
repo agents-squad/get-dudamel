@@ -54,7 +54,9 @@ detect_platform() {
 # ── Resolve latest version ───────────────────────────────────────────────────
 
 get_latest_version() {
-  local url="https://api.github.com/repos/${REPO}/releases/latest"
+  # Use /releases list instead of /releases/latest so pre-releases and
+  # non-"latest" releases are also found. The first entry is the newest.
+  local url="https://api.github.com/repos/${REPO}/releases?per_page=1"
   local header version
 
   header=$(auth_header)
