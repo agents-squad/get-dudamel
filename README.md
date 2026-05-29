@@ -8,7 +8,7 @@ Quick installer for the [Dudamel](https://github.com/agents-squad/dudamel) CLI.
 curl -fsSL https://agents-squad.github.io/get-dudamel/install.sh | GITHUB_TOKEN=YOUR_TOKEN bash
 ```
 
-> `GITHUB_TOKEN` requires `read:packages` scope. [Create one here](https://github.com/settings/tokens/new?scopes=read:packages).
+> `GITHUB_TOKEN` requires `repo` scope (classic token) or `Contents: Read-only` (fine-grained token). [Create one here](https://github.com/settings/tokens/new?scopes=repo).
 
 ## What it does
 
