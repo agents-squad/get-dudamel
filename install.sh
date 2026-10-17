@@ -54,31 +54,33 @@ detect_platform() {
 # ── Resolve latest version ───────────────────────────────────────────────────
 
 get_latest_version() {
-  # Use /releases list instead of /releases/latest so pre-releases and
-  # non-"latest" releases are also found. The first entry is the newest.
-  local url="https://api.github.com/repos/${REPO}/releases?per_page=1"
+  # The repo publishes two release streams: CLI binaries (cli-vX.Y.Z) and the
+  # platform images (vYYYY.MM.DD-N, no binaries attached). Take the newest
+  # cli-v* tag from a page of releases (newest first); /releases/latest or the
+  # first entry would pick a platform release whenever it is the most recent.
+  local url="https://api.github.com/repos/${REPO}/releases?per_page=100"
   local header version
 
   header=$(auth_header)
 
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$header" ]; then
-      version=$(curl -fsSL -H "$header" "$url" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+      version=$(curl -fsSL -H "$header" "$url" | grep '"tag_name": *"cli-v' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
     else
-      version=$(curl -fsSL "$url" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+      version=$(curl -fsSL "$url" | grep '"tag_name": *"cli-v' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
     fi
   elif command -v wget >/dev/null 2>&1; then
     if [ -n "$header" ]; then
-      version=$(wget -qO- --header="$header" "$url" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+      version=$(wget -qO- --header="$header" "$url" | grep '"tag_name": *"cli-v' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
     else
-      version=$(wget -qO- "$url" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+      version=$(wget -qO- "$url" | grep '"tag_name": *"cli-v' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
     fi
   else
     die "Neither curl nor wget found. Please install one of them."
   fi
 
   if [ -z "$version" ]; then
-    die "Could not determine the latest version. Check https://github.com/${REPO}/releases"
+    die "Could not find a CLI release (cli-v*). Check https://github.com/${REPO}/releases"
   fi
 
   echo "$version"
