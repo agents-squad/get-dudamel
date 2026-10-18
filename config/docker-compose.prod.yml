@@ -142,6 +142,7 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-dudamel}:${POSTGRES_PASSWORD}@postgresql:5432/${POSTGRES_DB:-dudamel}}
+      DUDAMEL_VERSION: ${DUDAMEL_VERSION:-latest}
       VAULT_ADDR: http://vault:8200
       REDIS_URL: redis://redis:6379
       STORAGE_ENDPOINT: http://seaweedfs:8333
