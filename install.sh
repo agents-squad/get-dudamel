@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Dudamel CLI installer — downloads the correct binary for your platform.
 #
-# Usage (public repo):
-#   curl -fsSL https://raw.githubusercontent.com/agents-squad/dudamel/main/packages/cli/scripts/install.sh | bash
+# Usage:
+#   curl -fsSL https://agents-squad.github.io/get-dudamel/install.sh | bash
 #
-# Usage (private repo):
-#   curl -fsSL -H "Authorization: token YOUR_GITHUB_PAT" \
-#     https://raw.githubusercontent.com/agents-squad/dudamel/main/packages/cli/scripts/install.sh | GITHUB_TOKEN=YOUR_GITHUB_PAT bash
+# The binaries are published as releases of the public agents-squad/get-dudamel
+# repo (mirrored from the private source repo by cli-release.yml), so no token is
+# needed. GITHUB_TOKEN is still honoured, only to lift the anonymous API rate limit.
 
 set -euo pipefail
 
-REPO="agents-squad/dudamel"
+REPO="agents-squad/get-dudamel"
 BINARY_NAME="dudamel"
 INSTALL_DIR="/usr/local/bin"
 FALLBACK_DIR="${HOME}/.local/bin"
@@ -150,7 +150,7 @@ download_binary() {
   trap 'rm -f "$tmp"' EXIT
 
   if [ -n "$GITHUB_TOKEN" ]; then
-    # Private repo: resolve asset ID via API, then download via asset endpoint
+    # Authenticated: resolve asset ID via API, then download via asset endpoint
     local api_url="https://api.github.com/repos/${REPO}/releases/tags/${version}"
     local asset_id
 
@@ -187,7 +187,7 @@ download_binary() {
         || die "Download failed. Asset: $filename"
     fi
   else
-    # Public repo: direct download
+    # Anonymous: direct download
     local url="https://github.com/${REPO}/releases/download/${version}/${filename}"
     if command -v curl >/dev/null 2>&1; then
       download_with_progress "$url" "$tmp" "$filename" \
@@ -249,9 +249,6 @@ main() {
   echo "  ╚══════════════════════════════════════╝"
   echo ""
 
-  if [ -z "$GITHUB_TOKEN" ]; then
-    info "No GITHUB_TOKEN set. If this is a private repo, export GITHUB_TOKEN first."
-  fi
 
   local platform version
   platform=$(detect_platform)

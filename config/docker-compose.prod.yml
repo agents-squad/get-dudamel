@@ -1,0 +1,467 @@
+# Dudamel Docker Compose — Production (CLI-managed)
+# This file is embedded in the CLI binary and written to the install directory.
+# It uses pre-built GHCR images instead of local builds.
+name: dudamel
+
+# Container log rotation. The json-file driver does NOT rotate by default, so a
+# long-running install grows its logs until the disk fills. 10m x 3 caps each
+# service at 30 MB. NOTE: `logging:` only takes effect when a container is
+# RECREATED, not on restart — `up -d --force-recreate` / `dudamel update` do that.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+# Dudamel images are published for linux/amd64 only (repo variable
+# PUBLISH_PLATFORMS in docker-publish.yml). Every image below pins its platform
+# so an arm64 host (Apple Silicon, Graviton, Ampere) pulls the amd64 variant and
+# runs it emulated (Rosetta in Docker Desktop, qemu binfmt on Linux) instead of
+# failing with "no matching manifest for linux/arm64". On an amd64 host the pin
+# is a no-op. Once arm64 images are published, set DUDAMEL_PLATFORM in .env (or
+# change the default here) to run them natively.
+
+services:
+  # Bundled PostgreSQL — only started when COMPOSE_PROFILES includes "bundled-db"
+  # (set in .env for bundled installs). In external-database mode the profile is
+  # absent, so this service is never pulled or started.
+  postgresql:
+    logging: *default-logging
+    image: pgvector/pgvector:pg17
+    profiles:
+      - bundled-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dudamel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-dudamel}
+    volumes:
+      - dudamel-postgres-data:/var/lib/postgresql/data
+      - ./init-pgvector.sql:/docker-entrypoint-initdb.d/01-init-pgvector.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-dudamel}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  temporal:
+    logging: *default-logging
+    image: temporalio/auto-setup:latest
+    environment:
+      DB: postgres12
+      DB_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-dudamel}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD}
+      POSTGRES_SEEDS: ${POSTGRES_HOST:-postgresql}
+      SKIP_SCHEMA_SETUP: 'false'
+      # Database names Temporal uses (defaults preserve prior behavior). Override
+      # via .env to namespace them on a shared/external Postgres, e.g.
+      # TEMPORAL_DBNAME=dudamel_temporal.
+      DBNAME: ${TEMPORAL_DBNAME:-temporal}
+      VISIBILITY_DBNAME: ${TEMPORAL_VISIBILITY_DBNAME:-temporal_visibility}
+      # Set TEMPORAL_SKIP_DB_CREATE=true when the DB user lacks CREATEDB and the
+      # databases above were pre-created out of band (schema setup still runs).
+      SKIP_DB_CREATE: ${TEMPORAL_SKIP_DB_CREATE:-false}
+    # No depends_on postgresql: the bundled DB is profile-gated (absent in external
+    # mode) and Temporal's auto-setup retries the DB connection on its own.
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'temporal operator cluster health --address $${TEMPORAL_CLI_ADDRESS:-$(hostname):7233} || exit 1',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+  vault:
+    logging: *default-logging
+    image: hashicorp/vault:1.17
+    entrypoint: /vault/config/entrypoint.sh
+    volumes:
+      - dudamel-vault-data:/vault/file
+      - dudamel-vault-shared:/vault/shared
+      - ./vault:/vault/config:ro
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:8200/v1/sys/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    logging: *default-logging
+    image: redis:7-alpine
+    restart: unless-stopped
+    # volatile-lru evicts only keys with a TTL (the ephemeral output:* step-log
+    # keys). The event stream (dudamel:events) and pending launch queues
+    # (dudamel:pending:*) have no TTL, so they are never evicted — evicting the
+    # stream would destroy the consumer group and stall webhook-triggered workflows.
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy volatile-lru
+    volumes:
+      - dudamel-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  gateway:
+    logging: *default-logging
+    image: nginx:alpine
+    networks: [edge]
+    volumes:
+      - ./gateway.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - '${GATEWAY_PORT:-8080}:80'
+    depends_on:
+      - orchestrator
+      - dashboard
+    restart: unless-stopped
+
+  dashboard:
+    logging: *default-logging
+    image: ghcr.io/agents-squad/dudamel-dashboard:${DUDAMEL_VERSION:-latest}
+    platform: ${DUDAMEL_PLATFORM:-linux/amd64}
+    networks: [edge]
+    depends_on:
+      orchestrator:
+        condition: service_started
+    restart: unless-stopped
+
+  orchestrator:
+    logging: *default-logging
+    image: ghcr.io/agents-squad/dudamel-orchestrator:${DUDAMEL_VERSION:-latest}
+    platform: ${DUDAMEL_PLATFORM:-linux/amd64}
+    networks: [default, edge]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-dudamel}:${POSTGRES_PASSWORD}@postgresql:5432/${POSTGRES_DB:-dudamel}}
+      VAULT_ADDR: http://vault:8200
+      REDIS_URL: redis://redis:6379
+      STORAGE_ENDPOINT: http://seaweedfs:8333
+      WEBHOOK_PORT: '3000'
+      DUDAMEL_MARKETPLACE_REPO: ${DUDAMEL_MARKETPLACE_REPO:-agents-squad/dudamel-marketplace}
+      DUDAMEL_MARKETPLACE_BRANCH: ${DUDAMEL_MARKETPLACE_BRANCH:-main}
+      # Which @dudamel/mcp-* npm version the marketplace tools plugin pins (release tag,
+      # npm version or dist-tag; unset = latest). Independent of DUDAMEL_VERSION on purpose.
+      DUDAMEL_MCP_VERSION: ${DUDAMEL_MCP_VERSION:-}
+      UPDATER_INTERNAL_TOKEN: ${UPDATER_INTERNAL_TOKEN}
+      ENGINE_URL: http://engine:3002
+      ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN}
+      INGRESS_URL: http://ingress:3003
+      INGRESS_INTERNAL_TOKEN: ${INGRESS_INTERNAL_TOKEN}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      # User API key lifetime (days): default when omitted, and the ceiling. Declared here
+      # because a .env value only substitutes in compose; it is not injected otherwise.
+      API_KEY_DEFAULT_EXPIRY_DAYS: ${API_KEY_DEFAULT_EXPIRY_DAYS:-90}
+      API_KEY_MAX_EXPIRY_DAYS: ${API_KEY_MAX_EXPIRY_DAYS:-365}
+    volumes:
+      - dudamel-vault-shared:/vault/shared:ro
+      # The marketplace repo must outlive the container: rebuilt on every deploy it got a
+      # new root commit, clients' `/plugin marketplace update` could not fast-forward, and
+      # they kept stale plugins until a remove + reinstall.
+      - dudamel-marketplace-data:/data/marketplace
+    healthcheck:
+      # The engine gates startup on this (orchestrator runs migrations before it
+      # starts listening, so healthy ⇒ schema is ready).
+      test:
+        [
+          'CMD-SHELL',
+          'node -e "fetch(\"http://127.0.0.1:3000/api/health/live\").then(r=>{if(!r.ok)throw 1}).catch(()=>process.exit(1))"',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      temporal:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Workflow execution engine (event consumer, trigger matcher, scheduler,
+  # starter). Own lean image; consumes the Redis event stream and starts
+  # executions directly on Temporal's shared queue. Internal HTTP (:3002) only.
+  # No docker.sock: only the updater talks to Docker.
+  engine:
+    logging: *default-logging
+    image: ghcr.io/agents-squad/dudamel-engine:${DUDAMEL_VERSION:-latest}
+    platform: ${DUDAMEL_PLATFORM:-linux/amd64}
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-dudamel}:${POSTGRES_PASSWORD}@postgresql:5432/${POSTGRES_DB:-dudamel}}
+      VAULT_ADDR: http://vault:8200
+      REDIS_URL: redis://redis:6379
+      ENGINE_PORT: '3002'
+      # La GC de blobs vive en el engine (data-retention), asi que necesita el
+      # object storage. Sin esta variable el servicio arranca igual y se limita a avisar
+      # "No object storage configured — blob collection is disabled": la recoleccion queda
+      # muerta y solo se ve en una linea de log del arranque.
+      STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://seaweedfs:8333}
+      # Horas que un blob huerfano debe tener antes de que la GC lo toque (default 6).
+      RETENTION_ORPHAN_GRACE_HOURS: ${RETENTION_ORPHAN_GRACE_HOURS:-6}
+      # Dias que un evento SIN workflow matcheado vive en event_log (default 7). Son el
+      # grueso de la tabla (payloads completos de webhooks) y solo sirven para inspeccionar
+      # la forma real de un evento al escribir el `match:` de un trigger. Los matcheados
+      # siguen la retencion general (RETENTION_EVENT_LOG_DAYS, 90 dias).
+      RETENTION_UNMATCHED_EVENT_LOG_DAYS: ${RETENTION_UNMATCHED_EVENT_LOG_DAYS:-7}
+      ENGINE_INTERNAL_TOKEN: ${ENGINE_INTERNAL_TOKEN}
+    volumes:
+      - dudamel-vault-shared:/vault/shared:ro
+    # Without it "started" counts as ready, and the orchestrator's RPC (manual runs) hits a
+    # closed :3002 while the engine is still booting.
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'node -e "fetch(\"http://127.0.0.1:3002/internal/health\").then(r=>{if(!r.ok)throw 1}).catch(()=>process.exit(1))"',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      temporal:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Persistent worker pool — polls the shared Temporal task queue
+  # `dudamel-main` and runs dynamicWorkflow + conversationWorkflow activities.
+  # Replaces the old ephemeral-container-per-execution model, so WITHOUT this
+  # service no workflow and no agent conversation ever executes (they sit queued
+  # forever). Scale the pool via WORKER_REPLICAS in .env, or ad-hoc with
+  # `docker compose up -d --scale worker=N`. No docker.sock: coding agents run
+  # in-process as a Landlock+seccomp sandboxed subprocess.
+  worker:
+    logging: *default-logging
+    image: ghcr.io/agents-squad/dudamel-worker:${DUDAMEL_VERSION:-latest}
+    platform: ${DUDAMEL_PLATFORM:-linux/amd64}
+    # The dudamel-sandbox wrapper builds a per-execution fictitious FS via
+    # user+mount namespaces (userns-rootless). Requires a custom seccomp profile (Docker
+    # default + the userns/mount setup syscalls; NOT unconfined). No capabilities added.
+    # NOTE: ./docker/worker-seccomp.json must be present at the deploy path — the CLI
+    # writes it next to this file, like the vault config.
+    #
+    # WORKER_APPARMOR_PROFILE defaults to `unconfined`, which is correct on hosts with
+    # no AppArmor userns restriction. On Ubuntu 24.04+ (where
+    # kernel.apparmor_restrict_unprivileged_userns=1) `unconfined` is precisely the
+    # RESTRICTED case and the jail cannot create a usable userns — there, load
+    # ./docker/worker-apparmor.profile on the host and set
+    # WORKER_APPARMOR_PROFILE=dudamel-worker in .env. It stays a variable because
+    # naming a profile that is not loaded (or on a host without AppArmor) makes the
+    # container fail to start outright. The entrypoint probes the capability at boot.
+    security_opt:
+      - seccomp:./docker/worker-seccomp.json
+      - apparmor=${WORKER_APPARMOR_PROFILE:-unconfined}
+    # Per-uid nftables egress firewall loaded by the entrypoint (deny
+    # internal except orchestrator:3000 for the sandbox uid). Only the worker root uses it.
+    cap_add:
+      - NET_ADMIN
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_TASK_QUEUE: dudamel-main
+      # The worker delivers conversational replies through the ingress's
+      # internal RPC (it owns the integration runtime), so it needs the same URL + token the
+      # orchestrator uses. The RPC is FAIL-CLOSED: without these two the worker cannot answer
+      # in any channel, so they must travel with the image, not be optional.
+      INGRESS_URL: http://ingress:3003
+      INGRESS_INTERNAL_TOKEN: ${INGRESS_INTERNAL_TOKEN}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-dudamel}:${POSTGRES_PASSWORD}@postgresql:5432/${POSTGRES_DB:-dudamel}}
+      VAULT_ADDR: http://vault:8200
+      REDIS_URL: redis://redis:6379
+      STORAGE_ENDPOINT: http://seaweedfs:8333
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # `wrapper` (default) mantiene el camino de producción actual;
+      # `gvisor` rutea run-script / MCP / coding agent dentro de un sandbox por ejecución.
+      # DEBE declararse aquí: una variable en .env sólo hace substitución en el compose, no
+      # se inyecta en el contenedor — sin esta línea el flag se ignora EN SILENCIO y se cree
+      # estar probando gVisor mientras corre el camino viejo.
+      DUDAMEL_SANDBOX_RUNTIME: ${DUDAMEL_SANDBOX_RUNTIME:-wrapper}
+      # Límites POR SANDBOX (= por ejecución) en modo gvisor, aplicados
+      # con un cgroup v2 delegado que el worker monta al arrancar. Una ejecución desbocada
+      # topa con SU techo en vez de ahogar a sus hermanas y al worker (medido: memoria con
+      # OOM de grupo, CPU con throttling, pids acotados; la hermana no se degrada).
+      # DIMENSIONADO: DUDAMEL_SANDBOX_MAX × DUDAMEL_SANDBOX_MEMORY_MB por encima de
+      # mem_limit (cuando se fije) hace que dispare primero el OOM killer del CONTENEDOR,
+      # que puede llevarse al worker; el worker avisa en el boot cuando eso pasa.
+      DUDAMEL_SANDBOX_MEMORY_MB: ${DUDAMEL_SANDBOX_MEMORY_MB:-2048}
+      DUDAMEL_SANDBOX_CPUS: ${DUDAMEL_SANDBOX_CPUS:-2}
+      DUDAMEL_SANDBOX_PIDS: ${DUDAMEL_SANDBOX_PIDS:-1024}
+      DUDAMEL_SANDBOX_MAX: ${DUDAMEL_SANDBOX_MAX:-8}
+      # Eviction por inactividad: es la limpieza PRIMARIA del sandbox (el execRoot en disco
+      # sobrevive y el step siguiente lo recrea). Declarada aquí porque el manager la lee del
+      # env y sin esta línea el .env se ignora en silencio.
+      DUDAMEL_SANDBOX_IDLE_MS: ${DUDAMEL_SANDBOX_IDLE_MS:-600000}
+      # Fail closed si el host no puede delegar cgroups (cgroup v1, controllers ausentes)
+      # en vez de correr SIN límites por sandbox con un aviso (default: fail soft — el
+      # porqué está en deployment/worker/cgroup-broker.sh).
+      DUDAMEL_SANDBOX_CGROUP_REQUIRE: ${DUDAMEL_SANDBOX_CGROUP_REQUIRE:-0}
+      # GC del cache compartido de herramientas (installs de mise +
+      # caches de gradle/uv/npm, el volumen de abajo). Corre al boot y cada 12 h, con
+      # dos palancas: tope de tamaño (por encima se desaloja lo MENOS usado primero) y
+      # TTL por desuso (una versión que nadie ejecuta hace N días se desaloja aunque
+      # haya espacio; 0 = desactivado).
+      DUDAMEL_TOOL_CACHE_MAX_MB: ${DUDAMEL_TOOL_CACHE_MAX_MB:-10240}
+      DUDAMEL_TOOL_CACHE_TTL_DAYS: ${DUDAMEL_TOOL_CACHE_TTL_DAYS:-30}
+    volumes:
+      - dudamel-vault-shared:/vault/shared:ro
+      # Cache compartido de herramientas. Un volumen por host: el guest efímero de
+      # instalación lo monta rw e instala ahí lo que pide el `environment:` del workflow;
+      # los guests de payload montan solo las versiones declaradas, en solo lectura.
+      # Compartido entre ejecuciones/workflows por decisión de producto (single-tenant).
+      - dudamel-worker-toolcache:/data/tool-cache
+    depends_on:
+      temporal:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    # Techo del contenedor. Los sandboxes son
+    # procesos HIJOS de este contenedor, así que su cgroup los acota a todos — Sentry,
+    # gofers y guests incluidos. Sin esto no hay ningún techo (medido: 0 mem / 0 nanocpus).
+    # Los defaults (0 / 0 / -1) significan "sin límite", o sea el comportamiento de antes.
+    mem_limit: ${WORKER_MEM_LIMIT:-0}
+    cpus: ${WORKER_CPUS:-0}
+    pids_limit: ${WORKER_PIDS_LIMIT:--1}
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+    restart: unless-stopped
+
+  # Integration ingress: webhooks (/webhooks/* via gateway) + Slack sockets + HITL.
+  # Publishes events to the Redis stream; internal HTTP (:3003) drives integration
+  # CRUD/runtime + admin notifications from the orchestrator.
+  ingress:
+    logging: *default-logging
+    image: ghcr.io/agents-squad/dudamel-ingress:${DUDAMEL_VERSION:-latest}
+    platform: ${DUDAMEL_PLATFORM:-linux/amd64}
+    networks: [default, edge]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-dudamel}:${POSTGRES_PASSWORD}@postgresql:5432/${POSTGRES_DB:-dudamel}}
+      VAULT_ADDR: http://vault:8200
+      REDIS_URL: redis://redis:6379
+      # Slack attachments (images) upload to SeaweedFS; the Slack instance factory
+      # initializes the storage client eagerly, so the ingress needs this too.
+      STORAGE_ENDPOINT: http://seaweedfs:8333
+      INGRESS_PORT: '3003'
+      INGRESS_INTERNAL_TOKEN: ${INGRESS_INTERNAL_TOKEN}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+    volumes:
+      - dudamel-vault-shared:/vault/shared:ro
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'node -e "fetch(\"http://127.0.0.1:3003/internal/health\").then(r=>{if(!r.ok)throw 1}).catch(()=>process.exit(1))"',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      temporal:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  seaweedfs:
+    logging: *default-logging
+    image: chrislusf/seaweedfs:latest
+    command: 'server -s3 -dir=/data -master.volumeSizeLimitMB=100'
+    volumes:
+      - dudamel-seaweedfs-data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:8333/ || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  context-server:
+    logging: *default-logging
+    image: ghcr.io/agents-squad/dudamel-context-server:${DUDAMEL_VERSION:-latest}
+    platform: ${DUDAMEL_PLATFORM:-linux/amd64}
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-dudamel}:${POSTGRES_PASSWORD}@postgresql:5432/${POSTGRES_DB:-dudamel}}
+      VAULT_ADDR: http://vault:8200
+    volumes:
+      - dudamel-vault-shared:/vault/shared:ro
+      - dudamel-context-data:/data
+    # No depends_on postgresql (profile-gated/external); the server waits for the
+    # DB on startup via waitForDatabaseReady.
+    depends_on:
+      vault:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'node -e "fetch(\"http://127.0.0.1:3001/health\").then(r=>{if(!r.ok)throw 1}).catch(()=>process.exit(1))"',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  updater:
+    logging: *default-logging
+    image: ghcr.io/agents-squad/dudamel-updater:latest
+    platform: ${DUDAMEL_PLATFORM:-linux/amd64}
+    environment:
+      DUDAMEL_INSTALL_DIR: /dudamel-config
+      UPDATER_INTERNAL_TOKEN: ${UPDATER_INTERNAL_TOKEN}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      POSTGRES_USER: ${POSTGRES_USER:-dudamel}
+      POSTGRES_DB: ${POSTGRES_DB:-dudamel}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/dudamel-config
+    restart: unless-stopped
+
+# Network segmentation: `data` is the default network — stateful
+# backends and internal services (engine, context-server, updater) join it
+# implicitly. Only services the gateway proxies to also join `edge`; the
+# gateway/dashboard sit on `edge` only and can't reach the data backends.
+# Ephemeral workers + agent containers launch onto `dudamel_data`.
+networks:
+  default:
+    name: dudamel_data
+  edge:
+    name: dudamel_edge
+
+volumes:
+  dudamel-postgres-data:
+  dudamel-vault-data:
+  dudamel-vault-shared:
+  dudamel-redis-data:
+  dudamel-seaweedfs-data:
+  dudamel-context-data:
+  dudamel-worker-toolcache:
+  dudamel-marketplace-data:
