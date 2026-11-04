@@ -321,6 +321,13 @@ services:
       # haya espacio; 0 = desactivado).
       DUDAMEL_TOOL_CACHE_MAX_MB: ${DUDAMEL_TOOL_CACHE_MAX_MB:-10240}
       DUDAMEL_TOOL_CACHE_TTL_DAYS: ${DUDAMEL_TOOL_CACHE_TTL_DAYS:-30}
+      # GC de workspaces de ejecución huérfanos (dirs <shared>/exec/<id> cuyo
+      # cleanupWorkspace nunca corrió: replace/crash/pérdida del pinned worker). Borra un
+      # dir solo si es más viejo que el TTL Y su ejecución está terminal o ausente en la
+      # DB. Corre al boot y en el intervalo. Declaradas aquí porque el worker las lee del
+      # env y sin esta línea el .env se ignora en silencio.
+      DUDAMEL_EXEC_GC_TTL_MS: ${DUDAMEL_EXEC_GC_TTL_MS:-21600000}
+      DUDAMEL_EXEC_GC_INTERVAL_MS: ${DUDAMEL_EXEC_GC_INTERVAL_MS:-3600000}
     volumes:
       - dudamel-vault-shared:/vault/shared:ro
       # Cache compartido de herramientas. Un volumen por host: el guest efímero de
@@ -328,6 +335,15 @@ services:
       # los guests de payload montan solo las versiones declaradas, en solo lectura.
       # Compartido entre ejecuciones/workflows por decisión de producto (single-tenant).
       - dudamel-worker-toolcache:/data/tool-cache
+      # Scratch de ejecución (workspaces exec/<id> + instructions) como volumen, no en la
+      # capa overlay del contenedor: sin copy-up por write, el disco usado queda visible
+      # como volumen nombrado y `docker ps -s` vuelve a ser señal útil (incidente
+      # 2026-10-25: 40GB invisibles en las capas escribibles). Compartido entre réplicas
+      # (`--scale worker=N` no permite un volumen por réplica): los dirs van keyeados por
+      # execution id y el GC de arriba decide por estado en DB, así que la exclusividad
+      # del dir no es necesaria. OJO: el volumen sobrevive al --force-recreate — ese GC
+      # es el único que lo mantiene a raya.
+      - dudamel-worker-shared:/tmp/dudamel-shared
     depends_on:
       temporal:
         condition: service_healthy
@@ -465,4 +481,5 @@ volumes:
   dudamel-seaweedfs-data:
   dudamel-context-data:
   dudamel-worker-toolcache:
+  dudamel-worker-shared:
   dudamel-marketplace-data:
