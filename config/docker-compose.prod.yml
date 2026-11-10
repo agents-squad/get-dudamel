@@ -162,8 +162,8 @@ services:
       # because a .env value only substitutes in compose; it is not injected otherwise.
       API_KEY_DEFAULT_EXPIRY_DAYS: ${API_KEY_DEFAULT_EXPIRY_DAYS:-90}
       API_KEY_MAX_EXPIRY_DAYS: ${API_KEY_MAX_EXPIRY_DAYS:-365}
-      # Renews the installed license every 12 h. Only called when a license key is installed;
-      # an unlicensed instance never contacts it. Empty disables automatic renewal.
+      # License server: registers the free community license once an admin has accepted the
+      # terms, then renews the installed license every 12 h. Empty disables both.
       DUDAMEL_LICENSE_SERVER_URL: ${DUDAMEL_LICENSE_SERVER_URL-https://ytdpjknujbasrreogtvu.supabase.co/functions/v1/licensing}
     volumes:
       - dudamel-vault-shared:/vault/shared:ro
