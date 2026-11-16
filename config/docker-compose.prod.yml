@@ -141,6 +141,9 @@ services:
     networks: [default, edge]
     environment:
       TEMPORAL_ADDRESS: temporal:7233
+      # The instance's time zone (IANA name, e.g. America/Argentina/Buenos_Aires): the date and
+      # time an agent is told on every message. UTC when unset.
+      DUDAMEL_TIMEZONE: ${DUDAMEL_TIMEZONE:-UTC}
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-dudamel}:${POSTGRES_PASSWORD}@postgresql:5432/${POSTGRES_DB:-dudamel}}
       DUDAMEL_VERSION: ${DUDAMEL_VERSION:-latest}
       VAULT_ADDR: http://vault:8200
@@ -280,6 +283,9 @@ services:
       - NET_ADMIN
     environment:
       TEMPORAL_ADDRESS: temporal:7233
+      # The instance's time zone (IANA name, e.g. America/Argentina/Buenos_Aires): the date and
+      # time an agent is told on every message. UTC when unset.
+      DUDAMEL_TIMEZONE: ${DUDAMEL_TIMEZONE:-UTC}
       TEMPORAL_TASK_QUEUE: dudamel-main
       # The worker delivers conversational replies through the ingress's
       # internal RPC (it owns the integration runtime), so it needs the same URL + token the
