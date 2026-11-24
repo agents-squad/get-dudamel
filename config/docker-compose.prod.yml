@@ -13,6 +13,12 @@ x-logging: &default-logging
     max-size: '10m'
     max-file: '3'
 
+# Every service (except the worker — see its block) sets `init: true` so /sbin/docker-init (tini) is PID 1. The
+# images' own entrypoints (node, temporal-server, weed…) do not reap orphaned
+# children, so every CMD-SHELL healthcheck that overruns its timeout leaves a
+# zombie process behind — a long-running install accumulates thousands. Like
+# `logging:`, `init:` only takes effect when a container is RECREATED.
+
 # Dudamel images are published for linux/amd64 only (repo variable
 # PUBLISH_PLATFORMS in docker-publish.yml). Every image below pins its platform
 # so an arm64 host (Apple Silicon, Graviton, Ampere) pulls the amd64 variant and
@@ -27,6 +33,7 @@ services:
   # absent, so this service is never pulled or started.
   postgresql:
     logging: *default-logging
+    init: true
     image: pgvector/pgvector:pg17
     profiles:
       - bundled-db
@@ -46,6 +53,7 @@ services:
 
   temporal:
     logging: *default-logging
+    init: true
     image: temporalio/auto-setup:latest
     environment:
       DB: postgres12
@@ -78,6 +86,7 @@ services:
 
   vault:
     logging: *default-logging
+    init: true
     image: hashicorp/vault:1.17
     entrypoint: /vault/config/entrypoint.sh
     volumes:
@@ -96,6 +105,7 @@ services:
 
   redis:
     logging: *default-logging
+    init: true
     image: redis:7-alpine
     restart: unless-stopped
     # volatile-lru evicts only keys with a TTL (the ephemeral output:* step-log
@@ -113,6 +123,7 @@ services:
 
   gateway:
     logging: *default-logging
+    init: true
     image: nginx:alpine
     networks: [edge]
     volumes:
@@ -126,6 +137,7 @@ services:
 
   dashboard:
     logging: *default-logging
+    init: true
     image: ghcr.io/agents-squad/dudamel-dashboard:${DUDAMEL_VERSION:-latest}
     platform: ${DUDAMEL_PLATFORM:-linux/amd64}
     networks: [edge]
@@ -136,6 +148,7 @@ services:
 
   orchestrator:
     logging: *default-logging
+    init: true
     image: ghcr.io/agents-squad/dudamel-orchestrator:${DUDAMEL_VERSION:-latest}
     platform: ${DUDAMEL_PLATFORM:-linux/amd64}
     networks: [default, edge]
@@ -203,6 +216,7 @@ services:
   # No docker.sock: only the updater talks to Docker.
   engine:
     logging: *default-logging
+    init: true
     image: ghcr.io/agents-squad/dudamel-engine:${DUDAMEL_VERSION:-latest}
     platform: ${DUDAMEL_PLATFORM:-linux/amd64}
     environment:
@@ -258,6 +272,13 @@ services:
   # in-process as a Landlock+seccomp sandboxed subprocess.
   worker:
     logging: *default-logging
+    # The ONE exception to init — explicitly false so a daemon.json `"init": true`
+    # cannot re-enable it. docker-init is bind-mounted at /usr/sbin/docker-init, and
+    # that locked submount under /usr makes the gVisor gofer's non-recursive bind of
+    # /usr fail inside the launcher userns: every sandbox dies at start with
+    # "cannot read client sync file: EOF" (SANDBOX_START_FAILED). The worker has no
+    # healthcheck, so it contributes no zombies without init.
+    init: false
     image: ghcr.io/agents-squad/dudamel-worker:${DUDAMEL_VERSION:-latest}
     platform: ${DUDAMEL_PLATFORM:-linux/amd64}
     # The dudamel-sandbox wrapper builds a per-execution fictitious FS via
@@ -378,6 +399,7 @@ services:
   # CRUD/runtime + admin notifications from the orchestrator.
   ingress:
     logging: *default-logging
+    init: true
     image: ghcr.io/agents-squad/dudamel-ingress:${DUDAMEL_VERSION:-latest}
     platform: ${DUDAMEL_PLATFORM:-linux/amd64}
     networks: [default, edge]
@@ -417,6 +439,7 @@ services:
 
   seaweedfs:
     logging: *default-logging
+    init: true
     image: chrislusf/seaweedfs:latest
     command: 'server -s3 -dir=/data -master.volumeSizeLimitMB=100'
     volumes:
@@ -430,6 +453,7 @@ services:
 
   context-server:
     logging: *default-logging
+    init: true
     image: ghcr.io/agents-squad/dudamel-context-server:${DUDAMEL_VERSION:-latest}
     platform: ${DUDAMEL_PLATFORM:-linux/amd64}
     environment:
@@ -458,6 +482,7 @@ services:
 
   updater:
     logging: *default-logging
+    init: true
     image: ghcr.io/agents-squad/dudamel-updater:latest
     platform: ${DUDAMEL_PLATFORM:-linux/amd64}
     environment:
